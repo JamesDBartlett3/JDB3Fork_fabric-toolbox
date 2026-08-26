@@ -388,7 +388,7 @@ def main():
         )
 
     correlation_seed = f"{ado_org_name}:{ado_project_name}:{ado_repo_name}:{ado_new_branch}:{event_time}"
-    correlation_id = hashlib.md5(correlation_seed.encode("utf-8")).hexdigest()[:12]
+    correlation_id = hashlib.sha256(correlation_seed.encode("utf-8")).hexdigest()[:12]
     log = CorrelationAdapter(logging.getLogger(__name__), {"correlation_id": correlation_id})
 
     log.info("Starting native branch-out event processing")
