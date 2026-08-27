@@ -85,6 +85,17 @@ Readme: This document
     1. Rebinding of notebooks, pipelines, semantic models and reports.
     2. Configuring access to “source” data either via copy or shortcut (shortcut only supported in the lakehouse currently)
 
+### Native branch-out trigger variant (additive)
+
+If developers use Fabric's native **Branch out to new workspace** UI capability and only need
+post-activity automation, use the additive variant in:
+
+`/accelerators/CICD/Branch-out-to-new-workspace/Native-trigger/`
+
+This variant does not replace or modify the existing scripts in this folder. It adds an
+alternative event-driven path that can process Azure DevOps branch-created events, correlate
+to the connected Fabric workspace, and invoke the same post-activity notebook automatically.
+
 ### Configuration steps
 
 #### Fabric

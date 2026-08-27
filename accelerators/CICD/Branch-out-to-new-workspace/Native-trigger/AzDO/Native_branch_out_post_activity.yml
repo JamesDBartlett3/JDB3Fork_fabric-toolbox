@@ -1,0 +1,154 @@
+# Native Fabric branch-out post-activity automation
+# This pipeline is triggered automatically via the incoming-webhook resource
+# when an Azure DevOps Service Hook delivers a branch-created event, or run
+# manually with explicit parameters.
+
+trigger: none
+
+resources:
+  webhooks:
+  - webhook: BranchCreatedHook
+    connection: FabricBranchOutServiceConnection
+    filters:
+    - path: eventType
+      value: git.branch.created
+
+parameters:
+- name: event_payload_path
+  displayName: Optional path to branch-created event payload JSON
+  type: string
+  default: ''
+
+- name: source_workspace_overrides_json
+  displayName: Optional per-source-workspace overrides JSON
+  type: string
+  default: ''
+
+- name: default_copy_lakehouse_data
+  displayName: Default copy lakehouse data (True or False)
+  type: string
+  default: 'False'
+
+- name: default_copy_warehouse_data
+  displayName: Default copy warehouse data (True or False)
+  type: string
+  default: 'False'
+
+- name: default_create_lakehouse_shortcuts
+  displayName: Default create lakehouse shortcuts (True or False)
+  type: string
+  default: 'True'
+
+- name: default_connections_from_to
+  displayName: Default pipeline connection swaps ((from,to),...)
+  type: string
+  default: '()'
+
+- name: default_has_wh_views_on_lh
+  displayName: Default has warehouse views on lakehouse (True or False)
+  type: string
+  default: 'False'
+
+- name: ledger_file_path
+  displayName: Durable shared ledger path for idempotency
+  type: string
+  default: ''
+
+# Optional direct event fields (for manual runs if no payload file is supplied)
+- name: ado_org_name
+  displayName: ADO organization name
+  type: string
+  default: ''
+
+- name: ado_project_name
+  displayName: ADO project name
+  type: string
+  default: ''
+
+- name: ado_repo_name
+  displayName: ADO repository name
+  type: string
+  default: ''
+
+- name: ado_new_branch
+  displayName: New branch name
+  type: string
+  default: ''
+
+- name: ado_new_branch_object_id
+  displayName: New branch object ID (commit SHA)
+  type: string
+  default: ''
+
+- name: event_time
+  displayName: Event time in ISO 8601
+  type: string
+  default: ''
+
+variables:
+- group: Fabric_Deployment_Group_S
+- group: Fabric_Deployment_Group_NS
+
+pool:
+  name: Azure Pipelines
+
+stages:
+- stage: NativeBranchOutPostActivity
+  jobs:
+  - job: ProcessNativeBranchOutEvent
+    steps:
+    # When triggered by a service hook via the incoming-webhook resource, write
+    # the webhook payload to a file so the script can consume it as a structured
+    # event payload.  The step is skipped on manual runs where a payload path or
+    # direct event fields are supplied instead.
+    - bash: |
+        set -euo pipefail
+        mkdir -p "$(Agent.TempDirectory)/native-branch-out"
+        PAYLOAD_FILE="$(Agent.TempDirectory)/native-branch-out/event_payload.json"
+        cat <<'EOF' > "$PAYLOAD_FILE"
+        ${{ convertToJson(resources.webhooks.BranchCreatedHook) }}
+        EOF
+        echo "##vso[task.setvariable variable=WEBHOOK_PAYLOAD_FILE]$PAYLOAD_FILE"
+      displayName: Write webhook payload to file
+      condition: >-
+        and(
+          eq('${{ parameters.event_payload_path }}', ''),
+          eq('${{ parameters.ado_org_name }}', ''),
+          eq(variables['Build.Reason'], 'ResourceTrigger')
+        )
+
+    - script: pip install requests
+      displayName: Install requests
+
+    - script: pip install msal
+      displayName: Install msal
+
+    - task: PythonScript@0
+      inputs:
+        scriptSource: filePath
+        scriptPath: accelerators/CICD/Branch-out-to-new-workspace/Native-trigger/AzDO/scripts/DetectAndRunNativeBranchOutPostActivity.py
+        arguments: >
+          --ADO_API_URL $(ADO_API_URL)
+          --ADO_ORG_NAME "${{ parameters.ado_org_name }}"
+          --ADO_PROJECT_NAME "${{ parameters.ado_project_name }}"
+          --ADO_REPO_NAME "${{ parameters.ado_repo_name }}"
+          --ADO_NEW_BRANCH "${{ parameters.ado_new_branch }}"
+          --ADO_NEW_BRANCH_OBJECT_ID "${{ parameters.ado_new_branch_object_id }}"
+          --EVENT_TIME "${{ parameters.event_time }}"
+          --EVENT_PAYLOAD_PATH "${{ coalesce(parameters.event_payload_path, variables.WEBHOOK_PAYLOAD_FILE, '') }}"
+          --TENANT_ID $(TENANT_ID)
+          --CLIENT_ID $(azclientid)
+          --USER_NAME $(username)
+          --PASSWORD $(password)
+          --FABRIC_TOKEN $(fabrictoken)
+          --ADO_PAT_TOKEN $(azdopat)
+          --NOTEBOOK_WORKSPACE_ID $(NOTEBOOK_WORKSPACE_ID)
+          --NOTEBOOK_ID $(NOTEBOOK_ID)
+          --DEFAULT_COPY_LAKEHOUSE ${{ parameters.default_copy_lakehouse_data }}
+          --DEFAULT_CREATE_SHORTCUTS ${{ parameters.default_create_lakehouse_shortcuts }}
+          --DEFAULT_COPY_WAREHOUSE ${{ parameters.default_copy_warehouse_data }}
+          --DEFAULT_CONNECTIONS_FROM_TO ${{ parameters.default_connections_from_to }}
+          --DEFAULT_HAS_WH_VIEWS_ON_LH ${{ parameters.default_has_wh_views_on_lh }}
+          --SOURCE_WORKSPACE_OVERRIDES_JSON '${{ parameters.source_workspace_overrides_json }}'
+          --LEDGER_FILE_PATH "${{ parameters.ledger_file_path }}"
+      displayName: Detect native branch-out and run post activity
