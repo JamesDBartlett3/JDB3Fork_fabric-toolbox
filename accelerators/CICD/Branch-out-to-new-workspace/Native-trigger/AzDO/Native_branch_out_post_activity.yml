@@ -100,13 +100,13 @@ stages:
         scriptPath: accelerators/CICD/Branch-out-to-new-workspace/Native-trigger/AzDO/scripts/DetectAndRunNativeBranchOutPostActivity.py
         arguments: >
           --ADO_API_URL $(ADO_API_URL)
-          --ADO_ORG_NAME ${{ parameters.ado_org_name }}
-          --ADO_PROJECT_NAME ${{ parameters.ado_project_name }}
-          --ADO_REPO_NAME ${{ parameters.ado_repo_name }}
-          --ADO_NEW_BRANCH ${{ parameters.ado_new_branch }}
-          --ADO_NEW_BRANCH_OBJECT_ID ${{ parameters.ado_new_branch_object_id }}
-          --EVENT_TIME ${{ parameters.event_time }}
-          --EVENT_PAYLOAD_PATH ${{ parameters.event_payload_path }}
+          --ADO_ORG_NAME "${{ parameters.ado_org_name }}"
+          --ADO_PROJECT_NAME "${{ parameters.ado_project_name }}"
+          --ADO_REPO_NAME "${{ parameters.ado_repo_name }}"
+          --ADO_NEW_BRANCH "${{ parameters.ado_new_branch }}"
+          --ADO_NEW_BRANCH_OBJECT_ID "${{ parameters.ado_new_branch_object_id }}"
+          --EVENT_TIME "${{ parameters.event_time }}"
+          --EVENT_PAYLOAD_PATH "${{ parameters.event_payload_path }}"
           --TENANT_ID $(TENANT_ID)
           --CLIENT_ID $(azclientid)
           --USER_NAME $(username)
