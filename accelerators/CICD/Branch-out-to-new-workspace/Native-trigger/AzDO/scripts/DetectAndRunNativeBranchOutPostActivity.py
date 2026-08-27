@@ -38,7 +38,8 @@ class EventLedger:
         self.path = path
         self.lock_path = f"{path}.lock"
         self._lock_handle = None
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
 
     def _acquire_lock(self):
         self._lock_handle = open(self.lock_path, "a", encoding="utf-8")
@@ -52,24 +53,59 @@ class EventLedger:
             self._lock_handle.close()
             self._lock_handle = None
 
+    @staticmethod
+    def _is_stale_running(record: Dict, max_age_seconds: int = 1800) -> bool:
+        updated_at = record.get("updatedAtUtc")
+        if not updated_at:
+            return True
+        try:
+            updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        age_seconds = (datetime.now(timezone.utc) - updated).total_seconds()
+        return age_seconds > max_age_seconds
+
     def _read(self) -> Dict[str, Dict]:
         if not os.path.exists(self.path):
             return {}
         with open(self.path, "r", encoding="utf-8") as f:
             try:
                 return json.load(f)
-            except json.JSONDecodeError:
-                return {}
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Ledger file '{self.path}' is corrupted. Refusing to discard deduplication history."
+                ) from exc
 
     def _write(self, data: Dict[str, Dict]):
-        with open(self.path, "w", encoding="utf-8") as f:
+        directory = os.path.dirname(self.path) or "."
+        os.makedirs(directory, exist_ok=True)
+        temp_path = f"{self.path}.tmp.{os.getpid()}.{time.time_ns()}"
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, self.path)
 
     def get(self, event_key: str) -> Optional[Dict]:
         self._acquire_lock()
         try:
             data = self._read()
             return data.get(event_key)
+        finally:
+            self._release_lock()
+
+    def claim(self, event_key: str, record: Dict, max_age_seconds: int = 1800) -> bool:
+        self._acquire_lock()
+        try:
+            data = self._read()
+            existing = data.get(event_key)
+            if existing and existing.get("status") == "succeeded":
+                return False
+            if existing and existing.get("status") == "running" and not self._is_stale_running(existing, max_age_seconds):
+                return False
+            data[event_key] = record
+            self._write(data)
+            return True
         finally:
             self._release_lock()
 
@@ -240,9 +276,12 @@ def correlate_workspaces(
     repo_name: str,
     new_branch: str,
     source_branch: Optional[str],
+    org_name: str = "",
+    project_name: str = "",
+    repo_id: str = "",
 ) -> Tuple[Optional[Dict], Optional[Dict], List[Dict]]:
-    target_workspace = None
-    source_workspace = None
+    target_candidates = []
+    source_candidates = []
     connected = []
 
     for ws in workspaces:
@@ -260,6 +299,19 @@ def correlate_workspaces(
         if details.get("repositoryName") != repo_name:
             continue
 
+        if org_name:
+            details_org = str(details.get("organizationName") or "").lower()
+            if details_org and details_org != org_name.lower():
+                continue
+        if project_name:
+            details_project = str(details.get("projectName") or "").lower()
+            if details_project and details_project != project_name.lower():
+                continue
+        if repo_id:
+            details_repo_id = str(details.get("repositoryId") or "").lower()
+            if details_repo_id and details_repo_id != str(repo_id).lower():
+                continue
+
         branch_name = details.get("branchName")
         enriched = {
             "workspaceId": ws_id,
@@ -270,11 +322,22 @@ def correlate_workspaces(
         connected.append(enriched)
 
         if branch_name == new_branch:
-            target_workspace = enriched
+            target_candidates.append(enriched)
         if source_branch and branch_name == source_branch:
-            source_workspace = enriched
+            source_candidates.append(enriched)
 
-    return target_workspace, source_workspace, connected
+    if len(target_candidates) > 1:
+        raise ValueError(
+            f"Ambiguous target workspace correlation for repo '{repo_name}' and branch '{new_branch}': "
+            + ", ".join(sorted(item["workspaceName"] or item["workspaceId"] for item in target_candidates))
+        )
+    if len(source_candidates) > 1:
+        raise ValueError(
+            f"Ambiguous source workspace correlation for repo '{repo_name}' and source branch '{source_branch}': "
+            + ", ".join(sorted(item["workspaceName"] or item["workspaceId"] for item in source_candidates))
+        )
+
+    return (target_candidates[0] if target_candidates else None), (source_candidates[0] if source_candidates else None), connected
 
 
 def build_event_key(org: str, project: str, repo: str, branch: str, target_workspace_id: str) -> str:
@@ -372,6 +435,7 @@ def main():
     parser.add_argument("--ADO_ORG_NAME", type=str, default="")
     parser.add_argument("--ADO_PROJECT_NAME", type=str, default="")
     parser.add_argument("--ADO_REPO_NAME", type=str, default="")
+    parser.add_argument("--ADO_REPO_ID", type=str, default="")
     parser.add_argument("--ADO_NEW_BRANCH", type=str, default="")
     parser.add_argument("--ADO_NEW_BRANCH_OBJECT_ID", type=str, default="")
     parser.add_argument("--EVENT_TIME", type=str, default="")
@@ -394,9 +458,13 @@ def main():
     parser.add_argument("--DEFAULT_HAS_WH_VIEWS_ON_LH", type=str, default="False")
     parser.add_argument("--SOURCE_WORKSPACE_OVERRIDES_JSON", type=str, default="")
 
-    parser.add_argument("--LEDGER_FILE_PATH", type=str, default="/tmp/native-branch-out/processed_events.json")
+    parser.add_argument("--LEDGER_FILE_PATH", type=str, default="")
 
     args = parser.parse_args()
+    if not args.LEDGER_FILE_PATH:
+        raise ValueError(
+            "A durable shared ledger path is required for idempotency; set --LEDGER_FILE_PATH to a persistent network or shared storage location."
+        )
 
     event_details = {}
     if args.EVENT_PAYLOAD_PATH:
@@ -405,6 +473,7 @@ def main():
     ado_org_name = args.ADO_ORG_NAME or event_details.get("ado_org_name", "")
     ado_project_name = args.ADO_PROJECT_NAME or event_details.get("ado_project_name", "")
     ado_repo_name = args.ADO_REPO_NAME or event_details.get("ado_repo_name", "")
+    ado_repo_id = args.ADO_REPO_ID or event_details.get("ado_repo_id", "")
     ado_new_branch = args.ADO_NEW_BRANCH or event_details.get("ado_new_branch", "")
     ado_new_branch_object_id = args.ADO_NEW_BRANCH_OBJECT_ID or event_details.get("ado_new_branch_object_id", "")
     event_time = normalize_event_time(args.EVENT_TIME or event_details.get("event_time", ""))
@@ -444,13 +513,32 @@ def main():
     log.info(f"Inferred source branch: {source_branch}")
 
     workspaces = list_fabric_workspaces(fabric_token)
-    target_ws, source_ws, connected_candidates = correlate_workspaces(
-        workspaces,
-        fabric_token,
-        ado_repo_name,
-        ado_new_branch,
-        source_branch,
-    )
+    target_ws = None
+    source_ws = None
+    connected_candidates = []
+    for attempt in range(1, 6):
+        try:
+            target_ws, source_ws, connected_candidates = correlate_workspaces(
+                workspaces,
+                fabric_token,
+                ado_repo_name,
+                ado_new_branch,
+                source_branch,
+                ado_org_name,
+                ado_project_name,
+                ado_repo_id,
+            )
+        except ValueError:
+            raise
+        if target_ws:
+            break
+        if attempt < 5:
+            log.info(
+                "Target workspace not yet visible in Fabric metadata; retrying correlation with backoff (%s/5)",
+                attempt,
+            )
+            time.sleep(min(5 * attempt, 30))
+            workspaces = list_fabric_workspaces(fabric_token)
 
     if not target_ws:
         raise ValueError(
@@ -473,6 +561,20 @@ def main():
     )
 
     ledger = EventLedger(args.LEDGER_FILE_PATH)
+
+    in_flight = {
+        "status": "running",
+        "eventTimeUtc": event_time,
+        "correlationId": correlation_id,
+        "sourceWorkspace": source_ws,
+        "targetWorkspace": target_ws,
+        "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
+    }
+    if not ledger.claim(event_key, in_flight):
+        current = ledger.get(event_key)
+        if current and current.get("status") == "running":
+            log.info("Event already claimed for processing by another run. Skipping duplicate execution.")
+            return
 
     defaults = {
         "copy_lakehouse_data": str(parse_bool(args.DEFAULT_COPY_LAKEHOUSE)),

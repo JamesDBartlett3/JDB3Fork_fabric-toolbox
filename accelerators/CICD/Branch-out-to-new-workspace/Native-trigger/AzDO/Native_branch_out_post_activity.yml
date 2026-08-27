@@ -1,8 +1,18 @@
 # Native Fabric branch-out post-activity automation
 # This pipeline is intended to be triggered by an Azure DevOps Service Hook
 # that emits branch-created events, or run manually with explicit parameters.
+# When using an incoming webhook, map the payload fields into the same
+# parameters below. Without that bridge, manual execution remains supported.
 
 trigger: none
+
+resources:
+  webhooks:
+  - webhook: nativeBranchOutEvent
+    connection: NativeBranchOutEventHook
+    filters:
+    - path: /resource/repository/name
+      value: $(ADO_REPO_NAME)
 
 parameters:
 - name: event_payload_path
@@ -41,9 +51,9 @@ parameters:
   default: 'False'
 
 - name: ledger_file_path
-  displayName: Persistent ledger file path for idempotency
+  displayName: Durable shared ledger path for idempotency
   type: string
-  default: '/tmp/native-branch-out/processed_events.json'
+  default: ''
 
 # Optional direct event fields (for manual runs if no payload file is supplied)
 - name: ado_org_name
@@ -121,5 +131,5 @@ stages:
           --DEFAULT_CONNECTIONS_FROM_TO ${{ parameters.default_connections_from_to }}
           --DEFAULT_HAS_WH_VIEWS_ON_LH ${{ parameters.default_has_wh_views_on_lh }}
           --SOURCE_WORKSPACE_OVERRIDES_JSON '${{ parameters.source_workspace_overrides_json }}'
-          --LEDGER_FILE_PATH ${{ parameters.ledger_file_path }}
+          --LEDGER_FILE_PATH "${{ parameters.ledger_file_path }}"
       displayName: Detect native branch-out and run post activity
