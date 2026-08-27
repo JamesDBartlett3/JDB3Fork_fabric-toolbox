@@ -168,11 +168,9 @@ def infer_source_branch(branches: List[Dict], new_branch: str, new_branch_object
             continue
         if object_id == new_branch_object_id:
             candidates.append(name)
-    if "main" in candidates:
-        return "main"
-    if "master" in candidates:
-        return "master"
-    return candidates[0] if candidates else None
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
 
 
 def list_fabric_workspaces(token: str) -> List[Dict]:
