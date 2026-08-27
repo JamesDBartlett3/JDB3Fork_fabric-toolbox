@@ -182,14 +182,12 @@ def list_fabric_workspaces(token: str) -> List[Dict]:
     continuation = None
 
     while True:
-        req_headers = dict(headers)
-        if continuation:
-            req_headers["x-ms-continuation-token"] = continuation
-        response = requests.get(url, headers=req_headers, timeout=30)
+        params = {"continuationToken": continuation} if continuation else None
+        response = requests.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
         payload = response.json()
         all_items.extend(payload.get("value", []))
-        continuation = response.headers.get("x-ms-continuation-token")
+        continuation = payload.get("continuationToken")
         if not continuation:
             break
 
