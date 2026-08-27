@@ -82,6 +82,38 @@ class EventLedger:
         finally:
             self._release_lock()
 
+    def claim(self, event_key: str, running_record: Dict, stale_running_seconds: int = 3600) -> Optional[Dict]:
+        """Atomically check status and write 'running' under one lock.
+
+        Returns None if the claim was granted (record written as 'running').
+        Returns the existing record if the event was already succeeded or is
+        actively running (within the stale threshold).  Stale 'running' records
+        (older than *stale_running_seconds*) are treated as abandoned and the
+        new claim is granted so that crash-interrupted events are retried.
+        """
+        self._acquire_lock()
+        try:
+            data = self._read()
+            existing = data.get(event_key)
+            if existing:
+                status = existing.get("status")
+                if status == "succeeded":
+                    return existing
+                if status == "running":
+                    updated_at = existing.get("updatedAtUtc")
+                    if updated_at:
+                        try:
+                            age = (datetime.now(timezone.utc) - datetime.fromisoformat(updated_at)).total_seconds()
+                            if age < stale_running_seconds:
+                                return existing
+                        except (ValueError, TypeError):
+                            pass
+            data[event_key] = running_record
+            self._write(data)
+            return None
+        finally:
+            self._release_lock()
+
 
 def acquire_fabric_token(tenant_id: str, client_id: str, user_name: str, password: str) -> Optional[str]:
     authority = f"https://login.microsoftonline.com/{tenant_id}"
@@ -441,10 +473,6 @@ def main():
     )
 
     ledger = EventLedger(args.LEDGER_FILE_PATH)
-    existing = ledger.get(event_key)
-    if existing and existing.get("status") == "succeeded":
-        log.info("Event already processed successfully. Skipping duplicate execution.")
-        return
 
     defaults = {
         "copy_lakehouse_data": str(parse_bool(args.DEFAULT_COPY_LAKEHOUSE)),
@@ -458,7 +486,7 @@ def main():
         source_ws["workspaceName"], defaults, args.SOURCE_WORKSPACE_OVERRIDES_JSON
     )
 
-    ledger.upsert(
+    existing = ledger.claim(
         event_key,
         {
             "status": "running",
@@ -471,6 +499,13 @@ def main():
             "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
         },
     )
+    if existing is not None:
+        status = existing.get("status")
+        if status == "succeeded":
+            log.info("Event already processed successfully. Skipping duplicate execution.")
+        else:
+            log.info("Event is currently being processed by another invocation. Skipping.")
+        return
 
     try:
         notebook_status = invoke_post_activity(
