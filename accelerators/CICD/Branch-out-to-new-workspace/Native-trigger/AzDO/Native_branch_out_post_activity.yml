@@ -1,18 +1,17 @@
 # Native Fabric branch-out post-activity automation
-# This pipeline is intended to be triggered by an Azure DevOps Service Hook
-# that emits branch-created events, or run manually with explicit parameters.
-# When using an incoming webhook, map the payload fields into the same
-# parameters below. Without that bridge, manual execution remains supported.
+# This pipeline is triggered automatically via the incoming-webhook resource
+# when an Azure DevOps Service Hook delivers a branch-created event, or run
+# manually with explicit parameters.
 
 trigger: none
 
 resources:
   webhooks:
-  - webhook: nativeBranchOutEvent
-    connection: NativeBranchOutEventHook
+  - webhook: BranchCreatedHook
+    connection: FabricBranchOutServiceConnection
     filters:
-    - path: /resource/repository/name
-      value: $(ADO_REPO_NAME)
+    - path: eventType
+      value: git.branch.created
 
 parameters:
 - name: event_payload_path
@@ -98,6 +97,26 @@ stages:
   jobs:
   - job: ProcessNativeBranchOutEvent
     steps:
+    # When triggered by a service hook via the incoming-webhook resource, write
+    # the webhook payload to a file so the script can consume it as a structured
+    # event payload.  The step is skipped on manual runs where a payload path or
+    # direct event fields are supplied instead.
+    - bash: |
+        set -euo pipefail
+        mkdir -p "$(Agent.TempDirectory)/native-branch-out"
+        PAYLOAD_FILE="$(Agent.TempDirectory)/native-branch-out/event_payload.json"
+        cat <<'EOF' > "$PAYLOAD_FILE"
+        ${{ convertToJson(resources.webhooks.BranchCreatedHook) }}
+        EOF
+        echo "##vso[task.setvariable variable=WEBHOOK_PAYLOAD_FILE]$PAYLOAD_FILE"
+      displayName: Write webhook payload to file
+      condition: >-
+        and(
+          eq('${{ parameters.event_payload_path }}', ''),
+          eq('${{ parameters.ado_org_name }}', ''),
+          eq(variables['Build.Reason'], 'ResourceTrigger')
+        )
+
     - script: pip install requests
       displayName: Install requests
 
@@ -116,7 +135,7 @@ stages:
           --ADO_NEW_BRANCH "${{ parameters.ado_new_branch }}"
           --ADO_NEW_BRANCH_OBJECT_ID "${{ parameters.ado_new_branch_object_id }}"
           --EVENT_TIME "${{ parameters.event_time }}"
-          --EVENT_PAYLOAD_PATH "${{ parameters.event_payload_path }}"
+          --EVENT_PAYLOAD_PATH "${{ coalesce(parameters.event_payload_path, variables.WEBHOOK_PAYLOAD_FILE, '') }}"
           --TENANT_ID $(TENANT_ID)
           --CLIENT_ID $(azclientid)
           --USER_NAME $(username)
