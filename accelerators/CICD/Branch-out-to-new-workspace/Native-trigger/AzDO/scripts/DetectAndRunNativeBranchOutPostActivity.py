@@ -94,36 +94,12 @@ class EventLedger:
         finally:
             self._release_lock()
 
-    def claim(self, event_key: str, record: Dict, max_age_seconds: int = 1800) -> bool:
-        self._acquire_lock()
-        try:
-            data = self._read()
-            existing = data.get(event_key)
-            if existing and existing.get("status") == "succeeded":
-                return False
-            if existing and existing.get("status") == "running" and not self._is_stale_running(existing, max_age_seconds):
-                return False
-            data[event_key] = record
-            self._write(data)
-            return True
-        finally:
-            self._release_lock()
-
-    def upsert(self, event_key: str, record: Dict):
-        self._acquire_lock()
-        try:
-            data = self._read()
-            data[event_key] = record
-            self._write(data)
-        finally:
-            self._release_lock()
-
     def claim(self, event_key: str, running_record: Dict, stale_running_seconds: int = 3600) -> Optional[Dict]:
         """Atomically check status and write 'running' under one lock.
 
         Returns None if the claim was granted (record written as 'running').
         Returns the existing record if the event was already succeeded or is
-        actively running (within the stale threshold).  Stale 'running' records
+        actively running (within the stale threshold). Stale 'running' records
         (older than *stale_running_seconds*) are treated as abandoned and the
         new claim is granted so that crash-interrupted events are retried.
         """
@@ -147,6 +123,15 @@ class EventLedger:
             data[event_key] = running_record
             self._write(data)
             return None
+        finally:
+            self._release_lock()
+
+    def upsert(self, event_key: str, record: Dict):
+        self._acquire_lock()
+        try:
+            data = self._read()
+            data[event_key] = record
+            self._write(data)
         finally:
             self._release_lock()
 
@@ -561,20 +546,6 @@ def main():
     )
 
     ledger = EventLedger(args.LEDGER_FILE_PATH)
-
-    in_flight = {
-        "status": "running",
-        "eventTimeUtc": event_time,
-        "correlationId": correlation_id,
-        "sourceWorkspace": source_ws,
-        "targetWorkspace": target_ws,
-        "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
-    }
-    if not ledger.claim(event_key, in_flight):
-        current = ledger.get(event_key)
-        if current and current.get("status") == "running":
-            log.info("Event already claimed for processing by another run. Skipping duplicate execution.")
-            return
 
     defaults = {
         "copy_lakehouse_data": str(parse_bool(args.DEFAULT_COPY_LAKEHOUSE)),
