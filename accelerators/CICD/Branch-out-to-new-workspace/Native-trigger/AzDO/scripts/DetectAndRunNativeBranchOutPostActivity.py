@@ -319,9 +319,9 @@ def invoke_post_activity(
         correlation_logger.info(f"Notebook operation status: {status}")
         if status in ["NotStarted", "Running"]:
             continue
-        if status == "Failed":
+        if status not in ["Succeeded", "Completed"]:
             failure = op.get("failureReason", {}).get("message", "Unknown failure")
-            raise ValueError(f"Post-activity notebook failed: {failure}")
+            raise ValueError(f"Post-activity notebook ended with status {status}: {failure}")
         return status
 
 
